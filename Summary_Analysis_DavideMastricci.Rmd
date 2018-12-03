@@ -1,0 +1,388 @@
+---
+title: "US commercial flights analysis - Summary report"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.show = 'asis')
+knitr::opts_chunk$set(dev = 'png')
+knitr::opts_chunk$set(results = 'asis')
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+library(RSQLite)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(caret)
+library(lmvar)
+library(GGally)
+library(scales)
+library(ggpubr)
+library(tidyquant)
+library(zoo)
+setwd("/Users/davidemastricci/Desktop/Progetto_Statistica/data")
+```
+
+
+# Introduction
+
+Analyzig the data from  **Research and Innovative Technology Administration (RITA)** we were able to answer the following questions:
+
+
+1. **How is the trend of commercial flights in the US?**
+
+
+
+2. **Which is the best (worst) day of the week to take a flight?**
+
+3. **Which is the best (worst) season to flight in terms of delay?**
+
+
+# Results
+
+The insight we found are:
+
+1. The trend of commercial flights in the USA as a number of flights seems **to grow**  year by year, even though in a non-linear way.
+
+```{r}
+path_db = "/Users/davidemastricci/Desktop/Progetto_Statistica/data/ontime.sqlite3"
+ontime <- dbConnect(RSQLite::SQLite(), dbname=path_db)
+from_db <- function(sql) {
+  dbGetQuery(ontime, sql)
+}
+```
+
+```{r warning=FALSE, message=FALSE}
+
+no_cancelled_flights <- from_db(" select Year, Month, DayofMonth, DayOfWeek, ArrDelay
+                    from ontime
+                    where Cancelled <> 1 and Year > 1987 ") #1987 has only three months recorded
+# Adjusting the type of some variables
+no_cancelled_flights$Month <- as.factor(no_cancelled_flights$Month)
+no_cancelled_flights$DayOfWeek <- as.factor(no_cancelled_flights$DayOfWeek)
+
+no_cancelled_flights$DayOfWeek <- recode(no_cancelled_flights$DayOfWeek,
+       "1"="Monday",
+       "2"="Tuesday",
+       "3"="Wednesday",
+       "4"="Thursday",
+       "5"="Friday",
+       "6"="Saturday",
+       "7"="Sunday")
+
+no_cancelled_flights$Month<- recode(no_cancelled_flights$Month,
+                      "1"= "Jan", 
+                      "2"= "Feb",
+                      "3"= "Mar", 
+                      "4"= "Apr",
+                      "5"= "May",
+                      "6"= "Jun",
+                      "7"= "Jul",
+                      "8"= "Aug",
+                      "9"= "Sep",
+                      "10"= "Oct",
+                      "11"= "Nov",
+                      "12"= "Dec")
+
+```
+
+```{r echo=FALSE}
+number_of_flights_analysis <- no_cancelled_flights %>%
+  group_by(Year) %>%
+  summarise(NumberOfFlights= n()) # create data frame grouped by year and the number of flight for each year
+
+```
+
+```{r}
+
+loess_plot <- ggplot(number_of_flights_analysis, aes(x=Year, y=NumberOfFlights))+
+  geom_line()+
+  stat_smooth(method = 'loess', aes(colour = 'loess'), level = .95, span = .3) +
+  ggtitle("Flight trend in US")+
+  scale_y_continuous(labels = scales::format_format(scientific= FALSE, big.mark=".", decimal.mark=","))
+
+loess_plot
+```
+
+2. The best day of the week to fly which minimize the probability of having a dalayed flight is **Saturday** with an average of percentage of delayed flights that moves from 30% to 52%. The warse day of the week are both **Friday** and **Thursday** with an avareges of percentage of delayed flights that moves respectively between 40% and 62% (Friday) and 39% and 63% (Thursday).
+
+
+```{r}
+dayOfWeek_analysis <- no_cancelled_flights %>%
+  group_by(Year,DayOfWeek) %>%
+  summarise(TotalDelay= sum(ArrDelay)) # create data frame grouped by year and the number of flight for each year
+
+
+ggplot(dayOfWeek_analysis, aes(x=Year, y=TotalDelay, color=DayOfWeek))+
+  geom_line()+
+  scale_y_continuous(labels = scales::format_format(scientific= FALSE, big.mark=".", decimal.mark=","))+
+  labs(color = "Day of Week")
+
+
+```
+
+```{r echo=FALSE}
+
+no_cancelled_flights$Month<- recode(no_cancelled_flights$Month,
+                      "Jan" = "1", 
+                      "Feb" = "2",
+                      "Mar" = "3", 
+                      "Apr"="4",
+                      "May"="5",
+                      "Jun"="6",
+                      "Jul"="7",
+                      "Aug"="8",
+                      "Sep"="9",
+                      "Oct"="10",
+                      "Nov"="11",
+                      "Dec"="12")
+
+
+no_cancelled_flights <- no_cancelled_flights %>%
+  mutate(Date = paste0(DayofMonth, "-",Month,"-",Year))
+
+no_cancelled_flights$Date <- as.Date(no_cancelled_flights$Date, "%d-%m-%Y")
+
+late_flight <- no_cancelled_flights %>%
+  filter(ArrDelay > 0)
+
+delay_analysis <- late_flight %>%
+  group_by(Date) %>%
+  summarise(NumberOfFlights = n())
+
+temp <- no_cancelled_flights %>%
+  group_by(Date) %>%
+  summarise(NumberOfFlights = n())
+
+delay_analysis <- full_join(temp, delay_analysis, by="Date")
+delay_analysis$PercLateFlight <- (delay_analysis$NumberOfFlights.y / delay_analysis$NumberOfFlights.x)
+# Days with no delayed flight will have NA as a value of column PercLateFlight so here we subistute with 0 which
+# means 0% of delayed flights
+delay_analysis$PercLateFlight[is.na(delay_analysis$PercLateFlight)] <- 0
+
+moving_average_30 <- rollmean(delay_analysis$PercLateFlight, 30)
+min_ma <- min(moving_average_30)
+max_ma <- max(moving_average_30)
+
+delay_analysis_day_week <- late_flight %>%
+  group_by(Date, DayOfWeek) %>%
+  summarise(NumberOfFlights = n())
+
+temp <- no_cancelled_flights %>%
+  group_by(Date, DayOfWeek) %>%
+  summarise(NumberOfFlights = n())
+
+delay_analysis_day_week <- full_join(temp, delay_analysis_day_week, by="Date")
+delay_analysis_day_week$PercLateFlight <- (delay_analysis_day_week$NumberOfFlights.y / delay_analysis_day_week$NumberOfFlights.x)
+# Days with no delayed flight will have NA as a value of column PercLateFlight so here we subistute with 0 which
+# means 0% of delayed flights
+delay_analysis_day_week$PercLateFlight[is.na(delay_analysis_day_week$PercLateFlight)] <- 0
+
+monday <- delay_analysis_day_week[delay_analysis_day_week$DayOfWeek.x == "Monday",]
+tuesday <- delay_analysis_day_week[delay_analysis_day_week$DayOfWeek.x == "Tuesday",]
+wednesday <- delay_analysis_day_week[delay_analysis_day_week$DayOfWeek.x == "Wednesday",]
+thursday <- delay_analysis_day_week[delay_analysis_day_week$DayOfWeek.x == "Thursday",]
+friday <- delay_analysis_day_week[delay_analysis_day_week$DayOfWeek.x == "Friday",]
+saturday <- delay_analysis_day_week[delay_analysis_day_week$DayOfWeek.x == "Saturday",]
+sunday <- delay_analysis_day_week[delay_analysis_day_week$DayOfWeek.x == "Sunday",]
+
+
+
+
+############# THURSDAY PLOT #####################
+moving_average_30 <- rollmean(thursday$PercLateFlight, 30)
+min_ma <- min(moving_average_30)
+max_ma <- max(moving_average_30)
+thursday_plot <- thursday %>%
+  ggplot(aes(x=Date, y=PercLateFlight))+
+  geom_line()+
+  geom_hline(yintercept = min_ma, color='red')+
+  geom_hline(yintercept = max_ma, color='red')+
+  geom_hline(yintercept = .5, color='green')+
+  geom_ma(aes(color="MA 30"),ma_fun = SMA, n=30) +
+  scale_y_continuous(labels = scales::format_format(scientific= FALSE, big.mark=".", decimal.mark=","))+
+  labs(y="% of delayed flights", x='Timeline')+
+  ggtitle("THURSDAY")
+
+############# FRIDAY PLOT #####################
+moving_average_30 <- rollmean(friday$PercLateFlight, 30)
+min_ma <- min(moving_average_30)
+max_ma <- max(moving_average_30)
+friday_plot <- friday %>%
+  ggplot(aes(x=Date, y=PercLateFlight))+
+  geom_line()+
+  geom_hline(yintercept = min_ma, color='red')+
+  geom_hline(yintercept = max_ma, color='red')+
+  geom_hline(yintercept = .5, color='green')+
+  geom_ma(aes(color="MA 30"),ma_fun = SMA, n=30) +
+  scale_y_continuous(labels = scales::format_format(scientific= FALSE, big.mark=".", decimal.mark=","))+
+  labs(y="% of delayed flights", x='Timeline')+
+  ggtitle("FRIDAY")
+
+############# SATURDAY PLOT #####################
+moving_average_30 <- rollmean(saturday$PercLateFlight, 30)
+min_ma <- min(moving_average_30)
+max_ma <- max(moving_average_30)
+saturday_plot <- saturday %>%
+  ggplot(aes(x=Date, y=PercLateFlight))+
+  geom_line()+
+  geom_hline(yintercept = min_ma, color='red')+
+  geom_hline(yintercept = max_ma, color='red')+
+  geom_hline(yintercept = .5, color='green')+
+  geom_ma(aes(color="MA 30"),ma_fun = SMA, n=30) +
+  scale_y_continuous(labels = scales::format_format(scientific= FALSE, big.mark=".", decimal.mark=","))+
+  labs(y="% of delayed flights", x='Timeline')+
+  ggtitle("SATURDAY")
+
+
+
+thursday_ma <- rollmean(thursday$PercLateFlight, 30)
+thursday_ma.max <- max(thursday_ma)
+thursday_ma.min <- min(thursday_ma)
+friday_ma <- rollmean(friday$PercLateFlight, 30)
+friday_ma.max <- max(friday_ma)
+friday_ma.min <- min(friday_ma)
+saturday_ma <- rollmean(saturday$PercLateFlight, 30)
+saturday_ma.max <- max(saturday_ma)
+saturday_ma.min <- min(saturday_ma)
+
+saturday_plot;
+friday_plot;
+thursday_plot;
+```
+
+3. The best season to fly to minimize the probability of having a dalayed flight is **Fall** with an average of percentage of delayed flights that goes from 29% to 57%. The worst seasons, instead, are **Summer** and **Winter** with an avareges of percentage of delayed flights that moves respectively between 36% and 63% (Summer) and 33% and 66% (Winter).
+
+
+```{r}
+
+no_cancelled_flights$Month <- as.factor(no_cancelled_flights$Month)
+no_cancelled_flights$Month<- recode(no_cancelled_flights$Month,
+                      "1"= "Jan", 
+                      "2"= "Feb",
+                      "3"= "Mar", 
+                      "4"= "Apr",
+                      "5"= "May",
+                      "6"= "Jun",
+                      "7"= "Jul",
+                      "8"= "Aug",
+                      "9"= "Sep",
+                      "10"= "Oct",
+                      "11"= "Nov",
+                      "12"= "Dec")
+
+no_cancelled_flights$Season <- no_cancelled_flights$Month
+no_cancelled_flights$Season<- recode(no_cancelled_flights$Season,
+                      "Jan" = "Winter", 
+                      "Feb" = "Winter",
+                      "Mar" = "Spring", 
+                      "Apr" = "Spring",
+                      "May" = "Spring",
+                      "Jun" = "Summer",
+                      "Jul" = "Summer",
+                      "Aug" = "Summer",
+                      "Sep" = "Fall",
+                      "Oct" = "Fall",
+                      "Nov" = "Fall",
+                      "Dec" = "Winter")
+
+
+season_analysis <- no_cancelled_flights %>%
+  group_by(Year,Season) %>%
+  summarise(TotalDelay= sum(ArrDelay)) # create data frame grouped by year and the number of flight for each year
+
+
+ggplot(season_analysis, aes(x=Year, y=TotalDelay, color=Season))+
+  geom_line()+
+  scale_y_continuous(labels = scales::format_format(scientific= FALSE, big.mark=".", decimal.mark=","))+
+  labs(color = "Season")
+
+```
+
+```{r }
+late_flight <- no_cancelled_flights %>%
+  filter(ArrDelay > 0)
+
+delay_analysis_season <- late_flight %>%
+  group_by(Date, Season) %>%
+  summarise(NumberOfFlights = n())
+
+temp <- no_cancelled_flights %>%
+  group_by(Date, Season) %>%
+  summarise(NumberOfFlights = n())
+
+delay_analysis_season <- full_join(temp, delay_analysis_season, by="Date")
+delay_analysis_season$PercLateFlight <- (delay_analysis_season$NumberOfFlights.y / delay_analysis_season$NumberOfFlights.x)
+# Days with no delayed flight will have NA as a value of column PercLateFlight so here we subistute with 0 which
+# means 0% of delayed flights
+delay_analysis_season$PercLateFlight[is.na(delay_analysis_season$PercLateFlight)] <- 0
+
+
+winter <- delay_analysis_season[delay_analysis_season$Season.x == "Winter",]
+fall <- delay_analysis_season[delay_analysis_season$Season.x == "Fall",]
+summer <- delay_analysis_season[delay_analysis_season$Season.x == "Summer",]
+spring <- delay_analysis_season[delay_analysis_season$Season.x == "Spring", ]
+
+
+############# WINTER PLOT #####################
+moving_average_30 <- rollmean(winter$PercLateFlight, 30)
+min_ma <- min(moving_average_30)
+max_ma <- max(moving_average_30)
+winter_plot <- winter %>%
+  ggplot(aes(x=Date, y=PercLateFlight))+
+  geom_line()+
+  geom_hline(yintercept = min_ma, color='red')+
+  geom_hline(yintercept = max_ma, color='red')+
+  geom_hline(yintercept = .5, color='green')+
+  geom_ma(aes(color="MA 30"),ma_fun = SMA, n=30) +
+  scale_y_continuous(labels = scales::format_format(scientific= FALSE, big.mark=".", decimal.mark=","))+
+  labs(y="% of delayed flights", x='Timeline')+
+  ggtitle("WINTER")
+
+############# FALL PLOT #####################
+moving_average_30 <- rollmean(fall$PercLateFlight, 30)
+min_ma <- min(moving_average_30)
+max_ma <- max(moving_average_30)
+fall_plot <- fall %>%
+  ggplot(aes(x=Date, y=PercLateFlight))+
+  geom_line()+
+  geom_hline(yintercept = min_ma, color='red')+
+  geom_hline(yintercept = max_ma, color='red')+
+  geom_hline(yintercept = .5, color='green')+
+  geom_ma(aes(color="MA 30"),ma_fun = SMA, n=30) +
+  scale_y_continuous(labels = scales::format_format(scientific= FALSE, big.mark=".", decimal.mark=","))+
+  labs(y="% of delayed flights", x='Timeline')+
+  ggtitle("FALL")
+
+
+############# SUMMER PLOT #####################
+moving_average_30 <- rollmean(summer$PercLateFlight, 30)
+min_ma <- min(moving_average_30)
+max_ma <- max(moving_average_30)
+summer_plot <- summer %>%
+  ggplot(aes(x=Date, y=PercLateFlight))+
+  geom_line()+
+  geom_hline(yintercept = min_ma, color='red')+
+  geom_hline(yintercept = max_ma, color='red')+
+  geom_hline(yintercept = .5, color='green')+
+  geom_ma(aes(color="MA 30"),ma_fun = SMA, n=30) +
+  scale_y_continuous(labels = scales::format_format(scientific= FALSE, big.mark=".", decimal.mark=","))+
+  labs(y="% of delayed flights", x='Timeline')+
+  ggtitle("SUMMER")
+
+
+
+
+
+
+fall_plot;
+summer_plot;
+winter_plot
+```
